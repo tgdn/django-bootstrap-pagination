@@ -5,7 +5,8 @@ except NameError:
 
 from django import template
 from django.http import Http404
-from django.core.paginator import Paginator, InvalidPage
+from django.core.paginator import Paginator, InvalidPage, EmptyPage, \
+                                  PageNotAnInteger
 from django.conf import settings
 
 register = template.Library()
@@ -15,6 +16,8 @@ DEFAULT_WINDOW = getattr(settings, 'PAGINATION_DEFAULT_WINDOW', 4)
 DEFAULT_ORPHANS = getattr(settings, 'PAGINATION_DEFAULT_ORPHANS', 0)
 INVALID_PAGE_RAISES_404 = getattr(settings,
     'PAGINATION_INVALID_PAGE_RAISES_404', False)
+INVALID_PAGE_FIXUP = getattr(settings,
+    'PAGINATION_INVALID_PAGE_FIXUP', False)
 
 def do_autopaginate(parser, token):
     """
@@ -82,24 +85,48 @@ class AutoPaginateNode(template.Node):
     def render(self, context):
         key = self.queryset_var.var
         value = self.queryset_var.resolve(context)
+        page_obj = None
+
         if isinstance(self.paginate_by, int):
             paginate_by = self.paginate_by
         else:
             paginate_by = self.paginate_by.resolve(context)
         paginator = Paginator(value, paginate_by, self.orphans)
+
         try:
             page_obj = paginator.page(context['request'].page)
-        except InvalidPage:
+        except InvalidPage, e:
             if INVALID_PAGE_RAISES_404:
                 raise Http404('Invalid page requested.  If DEBUG were set to ' +
                     'False, an HTTP 404 page would have been shown instead.')
+
+            if INVALID_PAGE_FIXUP:
+                # if we're fixing up an invalid page in the request then we
+                # assume that we'll goto the first page
+                default_page = 1
+
+                if type(e) == EmptyPage:
+                    # page requested is out of range, as long as the page
+                    # requested is greater than 1 then we show the last page
+                    # otherwise just use the default (first page)
+                    if int(context['request'].page) > 1:
+                        # deliver the last page
+                        default_page = paginator.num_pages
+
+                # get our page_obj
+                page_obj = paginator.page(default_page)
+
+        # if we don't have a page_obj from the Paginator then bail out
+        if page_obj is None:
             context[key] = []
             context['invalid_page'] = True
             return u''
+
         if self.context_var is not None:
             context[self.context_var] = page_obj.object_list
         else:
             context[key] = page_obj.object_list
+
         context['paginator'] = paginator
         context['page_obj'] = page_obj
         return u''
